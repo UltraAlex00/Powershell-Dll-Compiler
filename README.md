@@ -1,6 +1,8 @@
 # Powershell Dll Compiler
 Translates a `Powershell Class` into a `C# Class` and then compiles it. This class can be referenced across all .NET Languages.
+Project is currently in `alpha` state, so there will be some bugs. Please Report them!!
 
+Powershell Gallery: (https://www.powershellgallery.com/packages/PSDllCompiler/1.0.0)
 Discord: ultraalex0
 
 # Installation
@@ -45,7 +47,7 @@ In **.NET Projects** by simply adding the dll to the references and importing it
 
 using static ExampleClass;
 ```
-# Limitations - v1.0.0 - 23.8.2023
+# Limitations - v1.0.0-alpha - 23.8.2023
 ### Will be fixed
 * class cannot contain a reference to other dll
 * class default path is %USERPROFILE%, not the dll Path
