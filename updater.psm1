@@ -1,6 +1,6 @@
 class Updater {
 
-    static [Version]$Version = (Import-PowerShellDataFile .\PSDllCompiler.psd1).ModuleVersion
+    static [Version]$Version = (Import-PowerShellDataFile "$PSScriptRoot\PSDllCompiler.psd1").ModuleVersion
 
     static [bool] UpdateAvailable() {
     
