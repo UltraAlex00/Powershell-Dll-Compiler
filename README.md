@@ -40,7 +40,7 @@ using assembly example.dll #option 1
 Add-Type -Path example.dll #option 2
 [Reflection.Assembly]::LoadFile("example.dll") #option 3
 ```
-In **.NET Projects** by simply adding the dll to the references, installing the NuGet package "Microsoft.PowerShell.SDK" and importing it using:
+In **.NET Projects** by simply adding the dll to the references, installing the NuGet package "`Microsoft.PowerShell.SDK`" and importing it using:
 ```CSharp
 //C#
 
