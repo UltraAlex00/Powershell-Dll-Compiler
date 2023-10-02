@@ -5,7 +5,7 @@ Project is currently in **alpha** state, so there will be some bugs. Please Repo
 Discord: ultraalex0
 
 # Installation
-This Project can be found on the [Powershell Gallery](https://www.powershellgallery.com/packages/PSDllCompiler/1.0.0) and can be installed with the command:
+This Project can be found on the [Powershell Gallery](https://www.powershellgallery.com/packages/PSDllCompiler) and can be installed with the command:
 ```powershell
 Install-Module PSDllCompiler
 ```
@@ -40,7 +40,7 @@ using assembly example.dll #option 1
 Add-Type -Path example.dll #option 2
 [Reflection.Assembly]::LoadFile("example.dll") #option 3
 ```
-In **.NET Projects** by simply adding the dll to the references and importing it:
+In **.NET Projects** by simply adding the dll to the references, installing the NuGet package "Microsoft.PowerShell.SDK" and importing it using:
 ```CSharp
 //C#
 
