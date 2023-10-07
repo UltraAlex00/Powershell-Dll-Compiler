@@ -61,7 +61,7 @@ class CompilerTest {
 ```
 or using the argument `-ModuleReferences @("PSDllCompiler")`
 
-# v1.0.2-alpha - 31.08.2023
+# v1.0.2-beta - 7.10.2023
 * Added support for multiple classes
 * Added support for Write-Host, Write-Warning
 * Added argument -SkipUpdate
