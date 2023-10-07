@@ -32,11 +32,14 @@ Specifies the path where the resulting *.cs or *.dll file will be saved.
 .PARAMETER DebugMode
 Enables the GetPowershell() method, as well as access to both ClassHandlers and other features.
 
-.EXAMPLE
-Compile-Dll -Path .\example.psm1 -OutputAssembly .\example.dll
+.PARAMETER SkipUpdate
+Doesn't check for updates.
 
 .EXAMPLE
-Compile-Dll -Path .\example.psm1 -OutputAssembly .\example.cs
+Compile-Dll .\example.psm1 -o .\example.dll
+
+.EXAMPLE
+Compile-Dll .\example.psm1 -o .\example.cs
 
 .EXAMPLE
 $example = @'
@@ -61,6 +64,7 @@ function Compile-Dll {
 
     param (
         
+        [Parameter(Position = 0)]
         [string]$Path,
 
         [Parameter(ValueFromPipeline)]
@@ -68,42 +72,74 @@ function Compile-Dll {
 
         [string[]]$ModuleReferences,
 
+        [Alias("o")]
+        [Parameter(Position = 1)]
         [string]$OutputAssembly,
 
-        [switch]$DebugMode
+        [switch]$DebugMode,
+
+        [switch]$SkipUpdate
     )
 
     $ErrorActionPreference = [ActionPreference]::Stop
 
     #Update Check
 
-    Write-Output "`nChecking for Updates...`n"
+    if (!$SkipUpdate) {
 
-    if ([Updater]::UpdateAvailable()) {
-        
-        Write-Output "New update found!, use 'Update-Module PSDllCompiler'`n"
+        Write-Host "`nChecking for Updates...`n"
 
-        foreach($i in 0..5) {
+        if ([Updater]::UpdateAvailable()) {
         
-            Write-Output "Resuming in $(5 - $i)"
-            Start-Sleep 1
-            $i++
+            Write-Host "New update found!, use 'Update-Module PSDllCompiler'
+
+Current version: $([Updater]::CurrentVersion)
+Newest version:  $([Updater]::NewestVersion)
+
+Release Notes:
+$([Updater]::GetReleaseNotes()) 
+"
+            pause
         }
     }
+
+    
 
     if ($Path) {$Content = Get-Content $Path -Raw}
     elseif ($ScriptDefinition) {$Content = $ScriptDefinition}
     else {throw "Provide a input code using -Path or -ScriptDefinition !"}
 
     if (!$OutputAssembly) {throw "Provide a output path location using -OutputAssembly !"}
+    if (($OutputAssembly.Split(".") | Select-Object -Last 1) -notin @("dll", "cs")) {throw "Invalid file format! Valid formats: *.dll, *.cs"}
+    if (Test-Path $OutputAssembly) {throw "File '$OutputAssembly' allready exists!"}
 
-    $Content_Lines = $Content.Split("`n")
+    #adding class
+    Invoke-Expression $Content
 
-    Invoke-Expression $Content #Add Class
+    #adding include refs
+    [string[]]$ModuleReferences += $Content.Split("`n") | Select-String "#include " -SimpleMatch | ForEach-Object {([string]$_).Replace("#include ", "").Split(",")} | ForEach-Object {$_.Trim()}
 
-    foreach ($Class_Name in ($Content_Lines | Select-String "class" | Where-Object {!([string]$_).Contains("(")} | ForEach-Object {([string]$_).Split(" ")[1]})) {
+    #removing comments (& refs)
+    $Content = $Content -split "<#"
+    [string]$Content_Clean = ""
+    for ($i = 0; $i -lt $Content.Count; $i++) {
+        if ($i % 2 -eq 0) {$Content_Clean += $Content[$i]}
+        else {$Content_Clean += ($Content[$i] -split "#>")[1].Trim()}
+    }
+    [string[]]$Content_Lines = $Content_Clean.Split("`n") | ForEach-Object {([string]$_).Split("#")[0]}
+    [string]$Content = $Content_Lines -join "`n"
+
+    if ($Content -match "Write-Output") {throw "at $(($Content_Lines | Select-String "Write-Output" -SimpleMatch).LineNumber): Class cannot contain Write-Output !"}
+
+    [string[]]$ClassNames = $Content_Lines | Select-String "class" | Where-Object {!([string]$_).Contains("(") -and !([string]$_).Contains("$")} | ForEach-Object {([string]$_).Split(" ")[1]}
+
+    [string]$Class_Csharp = ""
+
+    for ([int]$progress = 0; $progress -lt $ClassNames.Count; $progress++) {
         
-        Write-Output "Compiling $Class_Name..."
+        $Class_Name = $ClassNames[$progress]
+
+        Write-Host "Compiling $Class_Name [$([string]($progress + 1) + "/" + $ClassNames.Count)]..."
 
         $Class_Constructors = Invoke-Expression "[$Class_Name].DeclaredConstructors" | Where-Object {$_.Name -eq ".ctor"}
         $Class_Methods = Invoke-Expression "[$Class_Name].DeclaredMethods" | Where-Object {!($_.Name.Contains("get_") -or $_.Name.Contains("set_"))}
@@ -125,30 +161,29 @@ function Compile-Dll {
 
         [string]$Class_Powershell = ""
         [string]$References_Powershell = ""
+        [string]$Class_Powershell_Basecode = $Content_Lines[(($Content_Lines | Select-String "class $($ClassNames[$progress]) ").LineNumber - 1)..($Content_Lines.Count - (($Content_Lines | Select-String "class $($ClassNames[$progress + 1]) ").LineNumber - 2))] -join "`n"
 
-        [string]$Class_Csharp = ""
 
-#Powershell Class & Function References-----------------------------------------------------------
+#Function References------------------------------------------------------------------------------
         
         $References_Powershell += '[string[]]$References_Module_b64 = @()' + "`n"
-
-        $Content_Lines | Select-String "#include " -SimpleMatch | ForEach-Object {([string]$_).Replace("#include ", "").Split(",")} | ForEach-Object {$ModuleReferences += $_.Trim()}
 
         if ($PSVersionTable.PSVersion -ge [Version]"6.0") {$InstalledModules = Get-Command -Module ((Get-ChildItem "C:\Program Files\WindowsPowerShell\Modules").Name | Where-Object {$_ -notin @("PackageManagement", "PowerShellGet")})} #Powershell Core and it sux balls
         else {$InstalledModules = Get-Command -Module (Get-InstalledModule | Where-Object {$_.Name -notin @("PackageManagement", "PowerShellGet")}).Name} #Windows Powershell
 
         foreach ($command in $InstalledModules) {
 
-            if ($Content -match $command.Name) {
+            if ($Class_Powershell_Basecode -match $command.Name) {
                 if ($command.ModuleName -cin $ModuleReferences) {
                     
-                    Write-Output "    Adding $($command.ModuleName)..."
+                    Write-Host "    Adding $($command.ModuleName)..."
 
                     $module = Get-Item $command.Module.Path
 
                     $tmpfile = Join-Path $env:TMP ((New-Guid).Guid + ".zip")
                     Compress-Archive "$($module.DirectoryName)\*" $tmpfile -CompressionLevel Optimal -Force
                     $b64module = [Convert]::ToBase64String([File]::ReadAllBytes($tmpfile))
+                    Remove-Item $tmpfile
 
                     $References_Powershell += '$References_Module_b64 += "' + $b64module + '"' + "`n"
                 }
@@ -167,10 +202,14 @@ foreach ($b64module in $References_Module_b64) {
     $tmpfolder = $tmpfile.Replace(".zip", "")
     Set-Content $tmpfile ([Convert]::FromBase64String($b64module)) -Encoding Byte
     Expand-Archive $tmpfile $tmpfolder
+    Remove-Item $tmpfile
     (Get-Childitem "$tmpfolder\*.psd1").FullName | Foreach-Object {Import-Module ([string]$_)}
 }'
 
-        $Class_Powershell += $Content
+#Powershell Class---------------------------------------------------------------------------------
+
+        $Class_Powershell += (($Content_Lines | Select-String @("using namespace", "using module", "using assembly") -SimpleMatch) -join "`n") + "`n"
+        $Class_Powershell += $Class_Powershell_Basecode
         $Class_Powershell += "`n`n" + '$Global:Class = [' + "$Class_Name]`n"
         $Class_Powershell += '$Global:Class_Constructed = $null' + "`n`n"
 
@@ -178,15 +217,11 @@ foreach ($b64module in $References_Module_b64) {
         
         foreach ($constructor in $Class_Constructors) {
 
-            [string]$CsConstructor = "    "
-
-            $CsConstructor += "public $Class_Name ("
-            $CsConstructor += "$([string]($constructor.GetParameters() -join ", ")))`n    {`n        "
-            $CsConstructor += "object[] Arguments = { $([string]($constructor.GetParameters().Name -join ", ")) };`n`n        "
-            $CsConstructor += "_ClassHandler($('"' + $Class_Name + '"'), Arguments);"
-            $CsConstructor += "`n    }`n`n"
-
-            $Class_Constructors_CSharp += $CsConstructor
+            $Class_Constructors_CSharp += "    public $Class_Name ("
+            $Class_Constructors_CSharp += "$([string]($constructor.GetParameters() -join ", ")))`n    {`n        "
+            $Class_Constructors_CSharp += "object[] Arguments = { $([string]($constructor.GetParameters().Name -join ", ")) };`n`n        "
+            $Class_Constructors_CSharp += "_ClassHandler($('"' + $Class_Name + '"'), Arguments);"
+            $Class_Constructors_CSharp += "`n    }`n`n"
         }
 
 #Class Methods------------------------------------------------------------------------------------
@@ -198,135 +233,143 @@ foreach ($b64module in $References_Module_b64) {
             $CsNamespace = "using $($method.ReturnType.Namespace);"
             if (!$Class_Namespaces_CSharp.Contains($CsNamespace)) {$Class_Namespaces_CSharp += $CsNamespace}
 
-            [string]$CsMethod = "    "
+            $Class_Methods_CSharp += "    "
 
             switch ($method) {
     
-                {$_.IsPublic} {$CsMethod += "public "}
-                {$_.IsPrivate} {$CsMethod += "private "}
-                {$_.IsStatic} {$CsMethod += "static "}
+                {$_.IsPublic} {$Class_Methods_CSharp += "public "}
+                {$_.IsPrivate} {$Class_Methods_CSharp += "private "}
+                {$_.IsStatic} {$Class_Methods_CSharp += "static "}
             }
-            $CsMethod += "$($method.ReturnType.Name) "
-            $CsMethod += "$($method.Name) ("
-            $CsMethod += "$([string]($method.GetParameters() -join ", ")))`n    {`n        "
-            $CsMethod += "object[] Arguments = { $([string]($method.GetParameters().Name -join ", ")) };`n`n        "
+            $Class_Methods_CSharp += "$($method.ReturnType.Name) "
+            $Class_Methods_CSharp += "$($method.Name) ("
+            $Class_Methods_CSharp += "$([string]($method.GetParameters() -join ", ")))`n    {`n        "
+            $Class_Methods_CSharp += "object[] Arguments = { $([string]($method.GetParameters().Name -join ", ")) };`n`n        "
             if ($method.IsStatic) {
-                if ($method.ReturnType.Name -eq "void") {$CsMethod += "_StaticClassHandler($('"' + $method.Name + '"'), Arguments);"}
-                else {$CsMethod += "return ($($method.ReturnType.Name))_StaticClassHandler($('"' + $method.Name + '"'), Arguments);"}
+                if ($method.ReturnType.Name -eq "void") {$Class_Methods_CSharp += "_StaticClassHandler($('"' + $method.Name + '"'), Arguments);"}
+                else {$Class_Methods_CSharp += "return ($($method.ReturnType.Name))_StaticClassHandler($('"' + $method.Name + '"'), Arguments);"}
             }
             else {
-                if ($method.ReturnType.Name -eq "void") {$CsMethod += "_ClassHandler($('"' + $method.Name + '"'), Arguments);"}
-                else {$CsMethod += "return ($($method.ReturnType.Name))_ClassHandler($('"' + $method.Name + '"'), Arguments);"}
+                if ($method.ReturnType.Name -eq "void") {$Class_Methods_CSharp += "_ClassHandler($('"' + $method.Name + '"'), Arguments);"}
+                else {$Class_Methods_CSharp+= "return ($($method.ReturnType.Name))_ClassHandler($('"' + $method.Name + '"'), Arguments);"}
             }
-            $CsMethod += "`n    }`n`n"
-            $CsMethod = $CsMethod.Replace("Void", "void")
-
-            $Class_Methods_CSharp += $CsMethod
+            $Class_Methods_CSharp += "`n    }`n`n"
+            $Class_Methods_CSharp = $Class_Methods_CSharp.Replace("Void", "void")
         }
 
 #Class Properties---------------------------------------------------------------------------------
 
         foreach ($property in $Class_Properties) {
-            
-            [string]$CsNamespace = ""
 
             $CsNamespace = "using $($property.PropertyType.Namespace);"
             if (!$Class_Namespaces_CSharp.Contains($CsNamespace)) {$Class_Namespaces_CSharp += $CsNamespace}
 
             [string]$CsProperty = ""
 
-            ($Content_Lines | Select-String "hidden" -SimpleMatch).LineNumber | ForEach-Object {
+            ($Class_Powershell_Basecode.Split("`n") | Select-String "hidden" -SimpleMatch).LineNumber | ForEach-Object {
                 if ($_ -and ([string](($Content_Lines[($_ - 1)..$Content_Lines.Count] | Select-String "\$")[0]) -match ("$" + $property.Name))) {
-                    $CsProperty += "    private "
+                    $Class_Properties_CSharp += "    private "
                 }
+                else {$Class_Properties_CSharp += "    public "}
             }
-            if (!$CsProperty) {$CsProperty += "    public "}
             if ($property.GetMethod.IsStatic -or $property.SetMethod.IsStatic) {
             
-                $CsProperty += "static "
+                $Class_Properties_CSharp += "static "
 
                 $Class_Static_Handler_Properties += @{$property.Name = $property.PropertyType.Name}
             }
             else {$Class_Handler_Properties += @{$property.Name = $property.PropertyType.Name}}
 
-            $CsProperty += "$($property.PropertyType.Name) $($property.Name) { get; set; }`n`n"
-
-            $Class_Properties_CSharp += $CsProperty
-
-            
+            $Class_Properties_CSharp += "$($property.PropertyType.Name) $($property.Name) { get; set; }`n`n"
         }
 
 #_ClassHandler------------------------------------------------------------------------------------
 
-        [string]$CsClassHandler = ""
+        if ($DebugMode) {$Class_Handler_CSharp += "`n    public "}
+        else {$Class_Handler_CSharp += "`n    private "}
 
-        if ($DebugMode) {$CsClassHandler += "`n    public "}
-        else {$CsClassHandler += "`n    private "}
-
-        $CsClassHandler += 'object _ClassHandler(string Method, object[] Arguments)
+        $Class_Handler_CSharp += 'object _ClassHandler(string Method, object[] Arguments)
     {
         if (_Powershell.Commands.Commands.Count == 0) { CreatePowershell(); }
 
-        string Script = Encoding.UTF8.GetString(Convert.FromBase64String("cGFyYW0gKFtzdHJpbmddJE1ldGhvZCwgW29iamVjdFtdXSRBcmd1bWVudHMsIFtoYXNodGFibGVdJFByb3BlcnRpZXMsIFtib29sXSRJc1N0YXRpYykNCkNsYXNzSGFuZGxlciAtTWV0aG9kICRNZXRob2QgLUFyZ3VtZW50cyAkQXJndW1lbnRzIC1Qcm9wZXJ0aWVzICRQcm9wZXJ0aWVzIC1Jc1N0YXRpYyAkSXNTdGF0aWM="));
+        string Script = Encoding.UTF8.GetString(Convert.FromBase64String("cGFyYW0gKFtzdHJpbmddJE1ldGhvZCwgW29iamVjdFtdXSRBcmd1bWVudHMsIFtoYXNodGFibGVdJFByb3BlcnRpZXMpDQpDbGFzc0hhbmRsZXIgJE1ldGhvZCAkQXJndW1lbnRzICRQcm9wZXJ0aWVzICRmYWxzZQ=="));
 
         Hashtable Properties = new Hashtable();'
         foreach ($property in $Class_Handler_Properties) {
         
-            $CsClassHandler += "`n        Properties.Add($('"' + $property.Keys + '"'), $($property.Keys));`n"
+            $Class_Handler_CSharp += "`n        Properties.Add($('"' + $property.Keys + '"'), $($property.Keys));`n"
         }
-        $CsClassHandler += '
+        $Class_Handler_CSharp += '
         _Powershell.Commands.Commands.Clear();
         _Powershell.AddScript(Script);
         _Powershell.AddArgument(Method);
         _Powershell.AddArgument(Arguments);
         _Powershell.AddArgument(Properties);
-        _Powershell.AddArgument(false); //IsStatic
 
         Hashtable returnproperties = _Powershell.Invoke()[0].BaseObject as Hashtable;
     '
         foreach ($property in $Class_Handler_Properties) {
         
-            $CsClassHandler += "`n        $($property.Keys) = ($($property.Values))returnproperties[$('"' + $property.Keys + '"')];"
+            $Class_Handler_CSharp += "`n        $($property.Keys) = ($($property.Values))returnproperties[$('"' + $property.Keys + '"')];"
         }
-        $CsClassHandler += "`n`n        return returnproperties" + '["RETURN"];' + "`n    }`n`n"
+        $Class_Handler_CSharp += '
+        
+        foreach (InformationRecord message in _Powershell.Streams.Information)
+        {
+            Console.WriteLine(message);
+        }
+        foreach (WarningRecord message in _Powershell.Streams.Warning)
+        {
+            Console.WriteLine("WARNING: {0}", message);
+        }
+        _Powershell.Streams.ClearStreams();
 
-        $Class_Handler_CSharp = $CsClassHandler
+        '
+        $Class_Handler_CSharp += "return returnproperties" + '["RETURN"];' + "`n    }`n`n"
 
 #_StaticClassHandler------------------------------------------------------------------------------
 
-        [string]$CsStaticClassHandler = ""
+        if ($DebugMode) {$Class_Static_Handler_CSharp += "`n    public "}
+        else {$Class_Static_Handler_CSharp += "`n    private "}
 
-        if ($DebugMode) {$CsStaticClassHandler += "`n    public "}
-        else {$CsStaticClassHandler += "`n    private "}
-
-        $CsStaticClassHandler += 'static object _StaticClassHandler(string Method, object[] Arguments)
+        $Class_Static_Handler_CSharp += 'static object _StaticClassHandler(string Method, object[] Arguments)
     {
         if (_Powershell.Commands.Commands.Count == 0) { CreatePowershell(); }
 
-        string Script = Encoding.UTF8.GetString(Convert.FromBase64String("cGFyYW0gKFtzdHJpbmddJE1ldGhvZCwgW29iamVjdFtdXSRBcmd1bWVudHMsIFtoYXNodGFibGVdJFByb3BlcnRpZXMsIFtib29sXSRJc1N0YXRpYykNCkNsYXNzSGFuZGxlciAtTWV0aG9kICRNZXRob2QgLUFyZ3VtZW50cyAkQXJndW1lbnRzIC1Qcm9wZXJ0aWVzICRQcm9wZXJ0aWVzIC1Jc1N0YXRpYyAkSXNTdGF0aWM="));
+        string Script = Encoding.UTF8.GetString(Convert.FromBase64String("cGFyYW0gKFtzdHJpbmddJE1ldGhvZCwgW29iamVjdFtdXSRBcmd1bWVudHMsIFtoYXNodGFibGVdJFByb3BlcnRpZXMpDQpDbGFzc0hhbmRsZXIgJE1ldGhvZCAkQXJndW1lbnRzICRQcm9wZXJ0aWVzICR0cnVl"));
 
         Hashtable Properties = new Hashtable();'
         foreach ($property in $Class_Static_Handler_Properties) {
         
-            $CsStaticClassHandler += "`n        Properties.Add($('"' + $property.Keys + '"'), $($property.Keys));`n"
+            $Class_Static_Handler_CSharp += "`n        Properties.Add($('"' + $property.Keys + '"'), $($property.Keys));`n"
         }
-        $CsStaticClassHandler += '
+        $Class_Static_Handler_CSharp += '
         _Powershell.Commands.Commands.Clear();
         _Powershell.AddScript(Script);
         _Powershell.AddArgument(Method);
         _Powershell.AddArgument(Arguments);
         _Powershell.AddArgument(Properties);
-        _Powershell.AddArgument(true); //IsStatic
 
         Hashtable returnproperties = _Powershell.Invoke()[0].BaseObject as Hashtable;
     '
         foreach ($property in $Class_Static_Handler_Properties) {
         
-            $CsStaticClassHandler += "`n        $($property.Keys) = ($($property.Values))returnproperties[$('"' + $property.Keys + '"')];"
+            $Class_Static_Handler_CSharp += "`n        $($property.Keys) = ($($property.Values))returnproperties[$('"' + $property.Keys + '"')];"
         }
-        $CsStaticClassHandler += "`n`n        return returnproperties" + '["RETURN"];' + "`n    }`n"
+        $Class_Static_Handler_CSharp += '
+        
+        foreach (InformationRecord message in _Powershell.Streams.Information)
+        {
+            Console.WriteLine(message);
+        }
+        foreach (WarningRecord message in _Powershell.Streams.Warning)
+        {
+            Console.WriteLine("WARNING: {0}", message);
+        }
+        _Powershell.Streams.ClearStreams();
 
-        $Class_Static_Handler_CSharp = $CsStaticClassHandler
+        '
+        $Class_Static_Handler_CSharp += "return returnproperties" + '["RETURN"];' + "`n    }`n"
 
 #CreatePowershell---------------------------------------------------------------------------------
         
@@ -337,7 +380,7 @@ foreach ($b64module in $References_Module_b64) {
     {
         string PlainRef = Encoding.UTF8.GetString(Convert.FromBase64String(_Base64Ref));
         string PlainClass = Encoding.UTF8.GetString(Convert.FromBase64String(_Base64Class));
-        string ClassHandler = Encoding.UTF8.GetString(Convert.FromBase64String("ZnVuY3Rpb24gQ2xhc3NIYW5kbGVyIChbc3RyaW5nXSRNZXRob2QsIFtvYmplY3RbXV0kQXJndW1lbnRzLCBbaGFzaHRhYmxlXSRQcm9wZXJ0aWVzLCBbYm9vbF0kSXNTdGF0aWMpIHsNCiAgICANCiAgICBmdW5jdGlvbiBSZXR1cm5IYW5kbGVyIChbb2JqZWN0XSRSZXR1cm5WYWx1ZSwgW3N0cmluZ1tdXSRFeGlzdGluZ1Byb3BlcnRpZXMsIFtzd2l0Y2hdJElzU3RhdGljKSB7DQoNCiAgICAgICAgJHRhYmxlICs9IEB7UkVUVVJOID0gJFJldHVyblZhbHVlfQ0KDQogICAgICAgIGlmICgkSXNTdGF0aWMpIHsNCiAgICAgICAgICAgIGZvcmVhY2ggKCRwcm9wZXJ0eSBpbiAkRXhpc3RpbmdQcm9wZXJ0aWVzKSB7DQogICAgICAgICAgICAgICAgJHRhYmxlICs9IEB7JHByb3BlcnR5ID0gJENsYXNzOjokcHJvcGVydHl9DQogICAgICAgICAgICB9DQogICAgICAgIH0NCiAgICAgICAgZWxzZSB7DQogICAgICAgICAgICBmb3JlYWNoICgkcHJvcGVydHkgaW4gJEV4aXN0aW5nUHJvcGVydGllcykgew0KICAgICAgICAgICAgICAgICR0YWJsZSArPSBAeyRwcm9wZXJ0eSA9ICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQuJHByb3BlcnR5fQ0KICAgICAgICAgICAgfQ0KICAgICAgICB9DQogICAgICAgIHJldHVybiAkdGFibGUNCiAgICB9DQoNCiAgICBpZiAoJElzU3RhdGljKSB7DQogICAgICAgIA0KICAgICAgICBpZiAoJFByb3BlcnRpZXMuR2V0RW51bWVyYXRvcigpLk1vdmVOZXh0KCkpIHsNCiAgICAgICAgICAgIGZvcmVhY2ggKCRwcm9wZXJ0eSBpbiAkUHJvcGVydGllcykgew0KICAgICAgICAgICAgICAgICRHbG9iYWw6Q2xhc3M6OigkcHJvcGVydHkuS2V5cykgPSAkcHJvcGVydHkuVmFsdWVzDQogICAgICAgICAgICB9DQogICAgICAgIH0NCiAgICAgICAgaWYgKCRBcmd1bWVudHMgLWFuZCAkTWV0aG9kKSB7DQogICAgICAgICAgICAkcmV0dXJudmFsdWUgPSAkR2xvYmFsOkNsYXNzOjokTWV0aG9kLkludm9rZSgkQXJndW1lbnRzKQ0KICAgICAgICB9DQogICAgICAgIGVsc2VpZiAoJE1ldGhvZCkgew0KICAgICAgICAgICAgJHJldHVybnZhbHVlID0gJEdsb2JhbDpDbGFzczo6JE1ldGhvZCgpDQogICAgICAgIH0NCiAgICAgICAgUmV0dXJuSGFuZGxlciAtUmV0dXJuVmFsdWUgJHJldHVybnZhbHVlIC1FeGlzdGluZ1Byb3BlcnRpZXMgJFByb3BlcnRpZXMuS2V5cyAtSXNTdGF0aWMNCiAgICB9DQogICAgZWxzZWlmICgkTWV0aG9kIC1lcSAkR2xvYmFsOkNsYXNzLk5hbWUpIHsNCiAgICAgICAgaWYgKCRBcmd1bWVudHMpIHsNCiAgICAgICAgICAgICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQgPSBOZXctT2JqZWN0ICRHbG9iYWw6Q2xhc3MuTmFtZSAkQXJndW1lbnRzDQogICAgICAgIH0NCiAgICAgICAgZWxzZSB7DQogICAgICAgICAgICAkR2xvYmFsOkNsYXNzX0NvbnN0cnVjdGVkID0gTmV3LU9iamVjdCAkR2xvYmFsOkNsYXNzLk5hbWUNCiAgICAgICAgfQ0KICAgICAgICBSZXR1cm5IYW5kbGVyIC1SZXR1cm5WYWx1ZSAiTlVMTCIgLUV4aXN0aW5nUHJvcGVydGllcyAkUHJvcGVydGllcy5LZXlzDQogICAgfQ0KICAgIGVsc2Ugew0KICAgICAgICBpZiAoJFByb3BlcnRpZXMuR2V0RW51bWVyYXRvcigpLk1vdmVOZXh0KCkpIHsNCiAgICAgICAgICAgIGZvcmVhY2ggKCRwcm9wZXJ0eSBpbiAkUHJvcGVydGllcykgew0KICAgICAgICAgICAgICAgICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQuKCRwcm9wZXJ0eS5LZXlzKSA9ICRwcm9wZXJ0eS5WYWx1ZXMNCiAgICAgICAgICAgIH0gIA0KICAgICAgICB9ICAgIA0KICAgICAgICBpZiAoJEFyZ3VtZW50cyAtYW5kICRNZXRob2QpIHsNCiAgICAgICAgICAgICRyZXR1cm52YWx1ZSA9ICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQuJE1ldGhvZC5JbnZva2UoJEFyZ3VtZW50cykNCiAgICAgICAgfQ0KICAgICAgICBlbHNlaWYgKCRNZXRob2QpIHsNCiAgICAgICAgICAgICRyZXR1cm52YWx1ZSA9ICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQuJE1ldGhvZCgpDQogICAgICAgIH0NCiAgICAgICAgUmV0dXJuSGFuZGxlciAtUmV0dXJuVmFsdWUgJHJldHVybnZhbHVlIC1FeGlzdGluZ1Byb3BlcnRpZXMgJFByb3BlcnRpZXMuS2V5cw0KICAgIH0NCn0="));
+        string ClassHandler = Encoding.UTF8.GetString(Convert.FromBase64String("JEdsb2JhbDpGaXJzdFJ1biA9ICR0cnVlDQokR2xvYmFsOkZpcnN0UnVuX1N0YXRpYyA9ICR0cnVlDQpmdW5jdGlvbiBDbGFzc0hhbmRsZXIgKFtzdHJpbmddJE1ldGhvZCwgW29iamVjdFtdXSRBcmd1bWVudHMsIFtoYXNodGFibGVdJFByb3BlcnRpZXMsIFtib29sXSRJc1N0YXRpYykgew0KICAgIA0KICAgIGZ1bmN0aW9uIFJldHVybkhhbmRsZXIgKFtvYmplY3RdJFJldHVyblZhbHVlLCBbc3RyaW5nW11dJEV4aXN0aW5nUHJvcGVydGllcywgW3N3aXRjaF0kSXNTdGF0aWMpIHsNCg0KICAgICAgICAkdGFibGUgKz0gQHtSRVRVUk4gPSAkUmV0dXJuVmFsdWV9DQoNCiAgICAgICAgaWYgKCRJc1N0YXRpYykgew0KICAgICAgICAgICAgZm9yZWFjaCAoJHByb3BlcnR5IGluICRFeGlzdGluZ1Byb3BlcnRpZXMpIHsNCiAgICAgICAgICAgICAgICAkdGFibGUgKz0gQHskcHJvcGVydHkgPSAkR2xvYmFsOkNsYXNzOjokcHJvcGVydHl9DQogICAgICAgICAgICB9DQogICAgICAgIH0NCiAgICAgICAgZWxzZSB7DQogICAgICAgICAgICBmb3JlYWNoICgkcHJvcGVydHkgaW4gJEV4aXN0aW5nUHJvcGVydGllcykgew0KICAgICAgICAgICAgICAgICR0YWJsZSArPSBAeyRwcm9wZXJ0eSA9ICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQuJHByb3BlcnR5fQ0KICAgICAgICAgICAgfQ0KICAgICAgICB9DQogICAgICAgIHJldHVybiAkdGFibGUNCiAgICB9DQoNCiAgICBpZiAoJElzU3RhdGljKSB7DQogICAgICAgIA0KICAgICAgICBpZiAoKCRHbG9iYWw6Rmlyc3RSdW5fU3RhdGljIC1hbmQgIVtzdHJpbmddOjpJc051bGxPckVtcHR5KCRQcm9wZXJ0aWVzLlZhbHVlcykpIC1vciAhJEdsb2JhbDpGaXJzdFJ1bl9TdGF0aWMpIHsNCiAgICAgICAgICAgIGZvcmVhY2ggKCRwcm9wZXJ0eSBpbiAkUHJvcGVydGllcy5LZXlzKSB7DQogICAgICAgICAgICAgICAgJEdsb2JhbDpDbGFzczo6KCRwcm9wZXJ0eSkgPSAkUHJvcGVydGllc1skcHJvcGVydHldDQogICAgICAgICAgICB9DQogICAgICAgIH0NCiAgICAgICAgJEdsb2JhbDpGaXJzdFJ1bl9TdGF0aWMgPSAkZmFsc2UNCg0KICAgICAgICAkcmV0dXJudmFsdWUgPSAkR2xvYmFsOkNsYXNzOjokTWV0aG9kLkludm9rZSgkQXJndW1lbnRzKQ0KICAgICAgICBSZXR1cm5IYW5kbGVyICRyZXR1cm52YWx1ZSAkUHJvcGVydGllcy5LZXlzIC1Jc1N0YXRpYw0KICAgIH0NCiAgICBlbHNlaWYgKCRNZXRob2QgLWVxICRHbG9iYWw6Q2xhc3MuTmFtZSkgew0KDQogICAgICAgICRHbG9iYWw6Q2xhc3NfQ29uc3RydWN0ZWQgPSBOZXctT2JqZWN0ICRHbG9iYWw6Q2xhc3MuTmFtZSAkQXJndW1lbnRzDQoNCiAgICAgICAgUmV0dXJuSGFuZGxlciAiTlVMTCIgJFByb3BlcnRpZXMuS2V5cw0KICAgIH0NCiAgICBlbHNlIHsNCiAgICAgICAgaWYgKCgkR2xvYmFsOkZpcnN0UnVuIC1hbmQgIVtzdHJpbmddOjpJc051bGxPckVtcHR5KCRQcm9wZXJ0aWVzLlZhbHVlcykpIC1vciAhJEdsb2JhbDpGaXJzdFJ1bikgew0KICAgICAgICAgICAgZm9yZWFjaCAoJHByb3BlcnR5IGluICRQcm9wZXJ0aWVzLktleXMpIHsNCiAgICAgICAgICAgICAgICAkR2xvYmFsOkNsYXNzX0NvbnN0cnVjdGVkLigkcHJvcGVydHkpID0gJFByb3BlcnRpZXNbJHByb3BlcnR5XQ0KICAgICAgICAgICAgfSAgDQogICAgICAgIH0NCiAgICAgICAgJEdsb2JhbDpGaXJzdFJ1biA9ICRmYWxzZSAgIA0KICAgICAgICANCiAgICAgICAgJHJldHVybnZhbHVlID0gJEdsb2JhbDpDbGFzc19Db25zdHJ1Y3RlZC4kTWV0aG9kLkludm9rZSgkQXJndW1lbnRzKQ0KICAgICAgICBSZXR1cm5IYW5kbGVyICRyZXR1cm52YWx1ZSAkUHJvcGVydGllcy5LZXlzDQogICAgfQ0KfQ=="));
 
         _Powershell.AddScript(PlainRef);
         _Powershell.AddScript(PlainClass);
@@ -347,30 +390,29 @@ foreach ($b64module in $References_Module_b64) {
 
 #Finishing CSharp Class---------------------------------------------------------------------------
 		
-		[string]$CsClass = ""
-		
-		$CsClass += $Class_Namespaces_CSharp -join "`n"
-		$CsClass += "`n`npublic class $Class_Name`n{`n    "
-		$CsClass += "private static PowerShell _Powershell = PowerShell.Create();`n`n    "
-		if ($DebugMode) {$CsClass += "public static object GetPowershell() { return _Powershell; }`n`n    "}
-        if ($DebugMode) {$CsClass += "public "}
-        else {$CsClass += "private "}
-		$CsClass += 'static string _Base64Class = "' + [Convert]::ToBase64String([Encoding]::UTF8.GetBytes($Class_Powershell)) + '";' + "`n`n    "
-        $CsClass += 'static string _Base64Ref = "' + [Convert]::ToBase64String([Encoding]::UTF8.GetBytes($References_Powershell)) + '";' + "`n`n    "
-        $CsClass += $Class_CreatePowershell_CSharp
+		$Class_Csharp += "`n`npublic class $Class_Name`n{`n    "
+		$Class_Csharp += "private static PowerShell _Powershell = PowerShell.Create();`n`n    "
+		if ($DebugMode) {$Class_Csharp += "public static object GetPowershell() { return _Powershell; }`n`n    "}
+        if ($DebugMode) {$Class_Csharp += "public "}
+        else {$Class_Csharp += "private "}
+		$Class_Csharp += 'static string _Base64Class = "' + [Convert]::ToBase64String([Encoding]::UTF8.GetBytes($Class_Powershell)) + '";' + "`n`n    "
+        if ($DebugMode) {$Class_Csharp += "public "}
+        else {$Class_Csharp += "private "}
+        $Class_Csharp += 'static string _Base64Ref = "' + [Convert]::ToBase64String([Encoding]::UTF8.GetBytes($References_Powershell)) + '";' + "`n`n    "
+        $Class_Csharp += $Class_CreatePowershell_CSharp
 
-		$CsClass += $Class_Static_Handler_CSharp
-		$CsClass += $Class_Handler_CSharp
+		$Class_Csharp += $Class_Static_Handler_CSharp
+		$Class_Csharp += $Class_Handler_CSharp
         
-        $CsClass += "    //Visible Class`n`n"
+        $Class_Csharp += "    //Visible Class`n`n"
 
-        $CsClass += $Class_Constructors_CSharp
-		$CsClass += $Class_Properties_CSharp
-		$CsClass += $Class_Methods_CSharp
-		$CsClass += "}"
-
-        $Class_Csharp += $CsClass
+        $Class_Csharp += $Class_Constructors_CSharp
+		$Class_Csharp += $Class_Properties_CSharp
+		$Class_Csharp += $Class_Methods_CSharp
+		$Class_Csharp += "}"
     }
+
+    $Class_Csharp = ($Class_Namespaces_CSharp -join "`n") + $Class_Csharp
 
 #Writing Class_CSharp-----------------------------------------------------------------------------
     
@@ -383,5 +425,5 @@ foreach ($b64module in $References_Module_b64) {
         New-Item -Path $OutputAssembly -Value $Class_Csharp | Out-Null
     }
 
-    Write-Output "`nSucesss, $((Get-Item $OutputAssembly).Name) has been compiled!"
+    Write-Host "`nSucesss, $((Get-Item $OutputAssembly).Name) has been compiled!"
 }
