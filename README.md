@@ -61,19 +61,16 @@ class CompilerTest {
 ```
 or using the argument `-ModuleReferences @("PSDllCompiler")`
 
-# v1.0.1-alpha - 31.08.2023
-* Added Module Reference system
-* Fixed Constructors beeing written 2x
-* Fixed Properties beeing recognized as private incorrectly
-* Fixed Types not beeing recognized due to lowercase
-* Fixed crash on updates
+# v1.0.2-alpha - 31.08.2023
+* Added support for multiple classes
+* Added support for Write-Host, Write-Warning
+* Added argument -SkipUpdate
+* Fixed method-property sync (temporary fix)
+* Improved ClassHandler_Powershell
 ### Next Update
-* .NET 6.0 Support
-* Read-Host
-* Write-Host etc.
+* independent property sync
 ### High Priority
-* multiple classes
 * partial classes
 ### Low Priority
-* hidden members are not acessable externaly
-* enum classes
+* Read-Host
+* class namespaces
