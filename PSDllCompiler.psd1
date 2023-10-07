@@ -12,7 +12,7 @@
 RootModule = 'PSDllCompiler.psm1'
 
 # Version number of this module.
-ModuleVersion = '1.0.1'
+ModuleVersion = '1.0.2'
 
 # Supported PSEditions
 # CompatiblePSEditions = @()
@@ -112,25 +112,22 @@ PrivateData = @{
 
 		# ReleaseNotes of this module
 		ReleaseNotes = @'
-1.0.1-beta 31.8.2023
-* Added Module Reference system
-* Fixed Constructors beeing written 2x
-* Fixed Properties beeing recognized as private incorrectly
-* Fixed Types not beeing recognized due to lowercase
-* Fixed crash on updates
+1.0.2-beta 7.10.2023
+* Added support for multiple classes
+* Added support for Write-Host, Write-Warning
+* Added argument -SkipUpdate
+* Fixed method-property sync (temporary fix)
+* Improved ClassHandler_Powershell
 
 Next Update
-* .NET 6.0 Support
-* Read-Host
-* Write-Host etc.
+* independent property sync
 
 High Priority
-* multiple classes
 * partial classes
 
 Low Priority
-* hidden members are not acessable externaly
-* enum classes
+* Read-Host
+* class namespaces
 '@
 	} # End of PSData hashtable
 
