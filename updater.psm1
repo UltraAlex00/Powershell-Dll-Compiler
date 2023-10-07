@@ -1,6 +1,6 @@
 class Updater {
 
-    static [Version]$CurrentVersion = (Import-PowerShellDataFile "$([Environment]::CurrentDirectory)\PSDllCompiler.psd1").ModuleVersion
+    static [Version]$CurrentVersion = (Import-PowerShellDataFile "$((Get-Item (Get-Module PSDllCompiler).Path).DirectoryName)\PSDllCompiler.psd1").ModuleVersion
 
     static [Version]$NewestVersion = (Find-Module PSDllCompiler).Version
 
